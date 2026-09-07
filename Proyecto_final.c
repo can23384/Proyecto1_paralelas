@@ -171,3 +171,55 @@ static int arguments(int argc, char **argv, Config *c) {
     }
     return 1;
 }
+
+/* PRNG local: inicializacion serial reproducible, sin rand() compartido. */
+static double random_unit(uint32_t *state) {
+    *state = *state * UINT32_C(1664525) + UINT32_C(1013904223);
+    return (double)(*state >> 8) / 16777216.0;
+}
+
+static double margin(const Config *c) {
+    return fmax(c->radius, c->foot_gap + c->foot_size * 0.5) + 2;
+}
+
+static void add_pair(Walker *w) {
+    for (int k = TRAIL_PAIRS - 1; k > 0; --k) w->trail[k] = w->trail[k-1];
+    w->trail[0] = (FootprintPair){w->x, w->y, atan2(w->vy, w->vx)};
+    if (w->trail_count < TRAIL_PAIRS) ++w->trail_count;
+}
+
+static int allocate_simulation(Simulation *s, int n) {
+    s->current = calloc((size_t)n, sizeof(Walker));
+    s->next = calloc((size_t)n, sizeof(Walker));
+    if (!s->current || !s->next) {
+        free(s->current); free(s->next);
+        s->current = s->next = NULL;
+        fprintf(stderr, "Memoria insuficiente para %d caminantes\n", n);
+        return 0;
+    }
+    return 1;
+}
+
+static void free_simulation(Simulation *s) {
+    free(s->current); free(s->next);
+    s->current = s->next = NULL;
+}
+
+static void reset_simulation(Simulation *s, const Config *c) {
+    uint32_t rng = c->seed;
+    double m = margin(c);
+    memset(s->current, 0, (size_t)c->n * sizeof(Walker));
+    memset(s->next, 0, (size_t)c->n * sizeof(Walker));
+    for (int i = 0; i < c->n; ++i) {
+        Walker *w = &s->current[i];
+        w->x = m + random_unit(&rng) * (c->width - 2*m);
+        w->y = m + random_unit(&rng) * (c->height - 2*m);
+        double angle = random_unit(&rng) * 2 * PI;
+        double speed = c->speed * (0.5 + 0.5 * random_unit(&rng));
+        w->vx = cos(angle) * speed; w->vy = sin(angle) * speed;
+        w->r = (unsigned char)(70 + 185 * random_unit(&rng));
+        w->g = (unsigned char)(70 + 185 * random_unit(&rng));
+        w->b = (unsigned char)(70 + 185 * random_unit(&rng));
+        add_pair(w);
+    }
+}
