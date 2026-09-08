@@ -223,3 +223,103 @@ static void reset_simulation(Simulation *s, const Config *c) {
         add_pair(w);
     }
 }
+
+/* Colision de discos de igual masa: impulso normal al aproximarse.
+ * Las contribuciones de contactos simultaneos se promedian para evitar
+ * impulsos excesivos. Es una aproximacion visual, no un solver rigido.
+ * Cada par se visita desde ambos extremos, siempre con el mismo snapshot.
+ */
+static void update_one(const Walker *old, Walker *next,
+                       const Config *c, int i, double dt) {
+    const Walker *a = &old[i];
+    Walker result = *a;
+    double dvx = 0, dvy = 0, dx_correction = 0, dy_correction = 0;
+    int contacts = 0;
+    double diameter = 2*c->radius;
+    for (int j = 0; j < c->n; ++j) {
+        if (j == i) continue;
+        double dx = a->x - old[j].x, dy = a->y - old[j].y;
+        double distance2 = dx*dx + dy*dy;
+        if (distance2 >= diameter*diameter) continue;
+        double distance = sqrt(distance2), nx, ny;
+        if (distance > 1e-10) { nx = dx/distance; ny = dy/distance; }
+        else {
+            /* Normal determinista y opuesta incluso en superposicion exacta. */
+            uint32_t lo = (uint32_t)(i < j ? i : j);
+            uint32_t hi = (uint32_t)(i < j ? j : i);
+            uint32_t hash = lo * UINT32_C(73856093) ^ hi * UINT32_C(19349663);
+            double angle = (hash % 3600) * (2*PI/3600);
+            double sign = i < j ? 1.0 : -1.0;
+            nx = sign*cos(angle); ny = sign*sin(angle);
+        }
+        double approach = (a->vx-old[j].vx)*nx + (a->vy-old[j].vy)*ny;
+        if (approach < 0) { dvx -= approach*nx; dvy -= approach*ny; }
+        double correction = 0.5*(diameter-distance);
+        dx_correction += correction*nx; dy_correction += correction*ny;
+        ++contacts;
+    }
+    if (contacts) {
+        result.vx += dvx/contacts; result.vy += dvy/contacts;
+        result.x += dx_correction/contacts;
+        result.y += dy_correction/contacts;
+    }
+    double speed = hypot(result.vx, result.vy);
+    if (speed > c->speed) {
+        result.vx *= c->speed/speed; result.vy *= c->speed/speed;
+    }
+    result.x += result.vx*dt; result.y += result.vy*dt;
+    double m = margin(c);
+    if (result.x < m) { result.x = m; result.vx = fabs(result.vx); }
+    if (result.x > c->width-m) {
+        result.x = c->width-m; result.vx = -fabs(result.vx);
+    }
+    if (result.y < m) { result.y = m; result.vy = fabs(result.vy); }
+    if (result.y > c->height-m) {
+        result.y = c->height-m; result.vy = -fabs(result.vy);
+    }
+    result.accumulator += dt;
+    if (result.accumulator >= c->step_interval) {
+        result.accumulator = fmod(result.accumulator, c->step_interval);
+        add_pair(&result);
+    }
+    next[i] = result;
+}
+
+static void step(Simulation *s, const Config *c, Mode mode, double dt) {
+    const Walker *old = s->current;
+    Walker *next = s->next;
+    int n = c->n;
+    if (mode == SEQUENTIAL) {
+        for (int i = 0; i < n; ++i) update_one(old, next, c, i, dt);
+    } else if (mode == PAR_STATIC) {
+        #pragma omp parallel for default(none) shared(old,next,c,n,dt) schedule(static)
+        for (int i = 0; i < n; ++i) update_one(old, next, c, i, dt);
+    } else {
+        int chunk = c->chunk;
+        #pragma omp parallel for default(none) shared(old,next,c,n,dt,chunk) schedule(dynamic,chunk)
+        for (int i = 0; i < n; ++i) update_one(old, next, c, i, dt);
+    }
+    /* La barrera implicita anterior protege el intercambio de buffers. */
+    s->current = next;
+    s->next = (Walker *)old;
+}
+
+static void advance(Simulation *s, const Config *c, Mode mode, double dt) {
+    /* Subpasos limitan desplazamiento y saltos a traves de otros discos. */
+    double maximum_dt = fmin(c->radius/(2*c->speed), c->step_interval);
+    int count = (int)ceil(dt/maximum_dt);
+    if (count < 1) count = 1;
+    for (int k = 0; k < count; ++k) step(s, c, mode, dt/count);
+}
+
+static int actual_threads(Mode mode) {
+    int count = 1;
+    if (mode != SEQUENTIAL) {
+        #pragma omp parallel default(none) shared(count)
+        {
+            #pragma omp single
+            count = omp_get_num_threads();
+        }
+    }
+    return count;
+}
