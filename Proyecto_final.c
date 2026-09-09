@@ -323,3 +323,114 @@ static int actual_threads(Mode mode) {
     }
     return count;
 }
+
+#ifndef HEADLESS_ONLY
+static int open_graphics(Graphics *g, const Config *c) {
+    SDL_SetMainReady();
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) goto error;
+    g->window = SDL_CreateWindow("Huellas", SDL_WINDOWPOS_CENTERED,
+                  SDL_WINDOWPOS_CENTERED, c->width, c->height, SDL_WINDOW_SHOWN);
+    if (!g->window) goto error;
+    /* Sin PRESENTVSYNC: no ocultar las diferencias de rendimiento. */
+    g->renderer = SDL_CreateRenderer(g->window, -1, SDL_RENDERER_ACCELERATED);
+    if (!g->renderer)
+        g->renderer = SDL_CreateRenderer(g->window, -1, SDL_RENDERER_SOFTWARE);
+    if (!g->renderer) goto error;
+    SDL_RendererInfo info;
+    if (SDL_GetRendererInfo(g->renderer, &info) == 0)
+        printf("Renderer: %s\n", info.name);
+    return 1;
+error:
+    fprintf(stderr, "SDL: %s\n", SDL_GetError());
+    return 0;
+}
+
+static void close_graphics(Graphics *g) {
+    if (g->renderer) SDL_DestroyRenderer(g->renderer);
+    if (g->window) SDL_DestroyWindow(g->window);
+    SDL_Quit();
+}
+
+static int events(void) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e))
+        if (e.type == SDL_QUIT ||
+            (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE)) return 0;
+    return 1;
+}
+
+/* Fuente bitmap integrada: no requiere SDL_ttf ni archivos externos. */
+static void text(SDL_Renderer *r, int x, int y, const char *message) {
+    static const char chars[] = "0123456789FPSN:.- ";
+    static const unsigned char glyphs[][7] = {
+        {14,17,19,21,25,17,14}, {4,12,4,4,4,4,14},
+        {14,17,1,2,4,8,31}, {30,1,1,14,1,1,30},
+        {2,6,10,18,31,2,2}, {31,16,16,30,1,1,30},
+        {14,16,16,30,17,17,14}, {31,1,2,4,8,8,8},
+        {14,17,17,14,17,17,14}, {14,17,17,15,1,1,14},
+        {31,16,16,30,16,16,16}, {30,17,17,30,16,16,16},
+        {15,16,16,14,1,1,30}, {17,25,25,21,19,19,17},
+        {0,4,4,0,4,4,0}, {0,0,0,0,0,12,12},
+        {0,0,0,31,0,0,0}, {0,0,0,0,0,0,0}
+    };
+    SDL_SetRenderDrawColor(r, 235, 240, 250, 255);
+    for (; *message; ++message, x += 12) {
+        const char *p = strchr(chars, *message);
+        if (!p) continue;
+        for (int row = 0; row < 7; ++row)
+            for (int col = 0; col < 5; ++col)
+                if (glyphs[p-chars][row] & (1 << (4-col))) {
+                    SDL_Rect pixel = {x+2*col, y+2*row, 2, 2};
+                    SDL_RenderFillRect(r, &pixel);
+                }
+    }
+}
+
+static void render(Graphics *g, const Simulation *s, const Config *c,
+                   Mode mode, double fps) {
+    SDL_Renderer *r = g->renderer;
+    SDL_SetRenderDrawColor(r, 5, 5, 12, 255);
+    SDL_RenderClear(r);
+    for (int i = 0; i < c->n; ++i) {
+        const Walker *w = &s->current[i];
+        for (int k = w->trail_count-1; k >= 0; --k) {
+            const FootprintPair *p = &w->trail[k];
+            double px = -sin(p->angle)*c->foot_gap;
+            double py = cos(p->angle)*c->foot_gap;
+            double brightness = 1.0 - 0.27*k;
+            SDL_SetRenderDrawColor(r, (Uint8)(w->r*brightness),
+                                      (Uint8)(w->g*brightness),
+                                      (Uint8)(w->b*brightness), 255);
+            SDL_Rect feet[2];
+            for (int f = 0; f < 2; ++f) {
+                double sign = f ? 1 : -1;
+                feet[f] = (SDL_Rect){
+                    (int)(p->x+sign*px-c->foot_size/2),
+                    (int)(p->y+sign*py-c->foot_size/2),
+                    (int)c->foot_size, (int)c->foot_size};
+            }
+            SDL_RenderFillRects(r, feet, 2);
+        }
+    }
+    SDL_Rect background = {6, 6, 440, 30};
+    SDL_SetRenderDrawColor(r, 12, 18, 28, 255);
+    SDL_RenderFillRect(r, &background);
+    char hud[96];
+    snprintf(hud, sizeof(hud), "N:%d FPS:%.1f", c->n, fps);
+    text(r, 14, 14, hud);
+    SDL_RenderPresent(r);
+    (void)mode;
+}
+#else
+static int open_graphics(Graphics *g, const Config *c) {
+    (void)g; (void)c;
+    fprintf(stderr, "Esta compilacion no incluye SDL2. Use --headless --benchmark.\n");
+    return 0;
+}
+static void close_graphics(Graphics *g) { (void)g; }
+static int events(void) { return 1; }
+static void render(Graphics *g, const Simulation *s, const Config *c,
+                   Mode mode, double fps) {
+    (void)g; (void)s; (void)c; (void)mode; (void)fps;
+}
+#endif
