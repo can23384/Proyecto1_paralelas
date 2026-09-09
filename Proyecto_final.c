@@ -434,3 +434,36 @@ static void render(Graphics *g, const Simulation *s, const Config *c,
     (void)g; (void)s; (void)c; (void)mode; (void)fps;
 }
 #endif
+
+static int interactive(Graphics *g, Simulation *s, const Config *c) {
+    reset_simulation(s, c);
+    double previous = now_seconds(), window_start = previous, fps = 0;
+    int frames = 0;
+    while (events()) {
+        double start = now_seconds();
+        double dt = fmin(start-previous, 0.05);
+        previous = start;
+        advance(s, c, c->mode, dt);
+        render(g, s, c, c->mode, fps);
+#ifndef HEADLESS_ONLY
+        if (c->fps > 0) {
+            double remaining = 1/c->fps - (now_seconds()-start);
+            if (remaining > 0) SDL_Delay((Uint32)(remaining*1000));
+        }
+#endif
+        ++frames;
+        double now = now_seconds();
+        /* FPS usa tiempo real, nunca el dt recortado de la simulacion. */
+        if (now-window_start >= 0.5) {
+            fps = frames/(now-window_start);
+#ifndef HEADLESS_ONLY
+            char title[160];
+            snprintf(title, sizeof(title), "Huellas | %s | N=%d | hilos=%d | FPS=%.1f",
+                     mode_name(c->mode), c->n, actual_threads(c->mode), fps);
+            SDL_SetWindowTitle(g->window, title);
+#endif
+            window_start = now; frames = 0;
+        }
+    }
+    return 1;
+}
