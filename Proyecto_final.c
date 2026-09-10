@@ -467,3 +467,108 @@ static int interactive(Graphics *g, Simulation *s, const Config *c) {
     }
     return 1;
 }
+
+static int measure(Graphics *g, Simulation *s, const Config *c,
+                   Mode mode, Measurement *result) {
+    reset_simulation(s, c);
+    result->threads = actual_threads(mode);
+    result->compute = 0;
+    for (int f = 0; f < c->warmup; ++f) {
+        if (!c->headless && !events()) return 0;
+        advance(s, c, mode, c->dt);
+        if (!c->headless) render(g, s, c, mode, 0);
+    }
+    double start = now_seconds();
+    for (int f = 0; f < c->frames; ++f) {
+        if (!c->headless && !events()) return 0;
+        double before = now_seconds();
+        advance(s, c, mode, c->dt);
+        result->compute += now_seconds()-before;
+        if (!c->headless) {
+            double elapsed = now_seconds()-start;
+            render(g, s, c, mode, f && elapsed > 0 ? f/elapsed : 0);
+        }
+    }
+    result->total = now_seconds()-start;
+    return result->compute > 0 && result->total > 0;
+}
+
+static FILE *create_csv(const char *path) {
+    /* Creacion exclusiva compatible con Linux y los runtimes de MinGW. */
+#ifdef _WIN32
+    int fd = _open(path, _O_WRONLY | _O_CREAT | _O_EXCL | _O_TEXT,
+                   _S_IREAD | _S_IWRITE);
+    if (fd < 0) return NULL;
+    FILE *file = _fdopen(fd, "w");
+    if (!file) _close(fd);
+#else
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0666);
+    if (fd < 0) return NULL;
+    FILE *file = fdopen(fd, "w");
+    if (!file) close(fd);
+#endif
+    return file;
+}
+
+static int benchmark(Graphics *g, Simulation *s, const Config *c) {
+    FILE *file = create_csv(c->csv);
+    if (!file) { perror(c->csv); return 0; }
+    fprintf(file, "# n=%d,width=%d,height=%d,seed=%u,requested_threads=%d,"
+            "chunk=%d,dt=%.9g,warmup=%d,speed=%.9g,radius=%.9g,"
+            "foot_size=%.9g,foot_gap=%.9g,step_interval=%.9g,openmp=%d\n",
+            c->n,c->width,c->height,c->seed,c->threads,c->chunk,c->dt,
+            c->warmup,c->speed,c->radius,c->foot_size,c->foot_gap,
+            c->step_interval,_OPENMP);
+    fprintf(file, "scope,kind,mode,n,threads,repeat,frames,compute_s,total_s,"
+            "fps_or_cpu_steps_s,speedup_compute,efficiency_compute,"
+            "speedup_total,efficiency_total\n");
+    Measurement *records = calloc((size_t)c->repeats*3, sizeof(*records));
+    if (!records) { fclose(file); fprintf(stderr, "Sin memoria para pruebas\n"); return 0; }
+    double compute[3] = {0}, total[3] = {0};
+    int success = 1;
+    const char *scope = c->headless ? "cpu_only" : "graphics";
+    for (int repeat = 0; repeat < c->repeats && success; ++repeat) {
+        /* Rotar el orden reduce sesgo de calentamiento y orden de ejecucion. */
+        for (int position = 0; position < 3; ++position) {
+            int mode = (repeat+position)%3;
+            Measurement *m = &records[repeat*3+mode];
+            if (!measure(g, s, c, (Mode)mode, m)) { success = 0; break; }
+            compute[mode] += m->compute; total[mode] += m->total;
+            printf("%s prueba %d/%d %-7s hilos=%d calculo=%.6fs total=%.6fs %s=%.2f\n",
+                   scope,repeat+1,c->repeats,mode_name((Mode)mode),m->threads,
+                   m->compute,m->total,c->headless ? "pasos/s" : "FPS",
+                   c->frames/m->total);
+            fprintf(file, "%s,measurement,%s,%d,%d,%d,%d,%.9f,%.9f,%.6f,,,,\n",
+                    scope,mode_name((Mode)mode),c->n,m->threads,repeat+1,
+                    c->frames,m->compute,m->total,c->frames/m->total);
+            if (fflush(file) != 0) { success = 0; break; }
+        }
+    }
+    if (success) {
+        puts("\nResumen: speedup = media secuencial / media paralela; eficiencia = speedup / hilos.");
+        for (int mode = 0; mode < 3; ++mode) {
+            int threads = records[mode].threads;
+            for (int r = 1; r < c->repeats; ++r) {
+                if (records[r*3+mode].threads != threads) {
+                    fprintf(stderr, "Cantidad de hilos variable; resumen invalido\n");
+                    success = 0;
+                }
+            }
+            if (!success) break;
+            double sc = compute[0]/compute[mode], st = total[0]/total[mode];
+            double fps = (double)c->frames*c->repeats/total[mode];
+            printf("%-7s calculo: S=%.3f E=%.2f%% | total: S=%.3f E=%.2f%% | %s=%.2f\n",
+                   mode_name((Mode)mode),sc,100*sc/threads,st,100*st/threads,
+                   c->headless ? "pasos/s CPU" : "FPS",fps);
+            fprintf(file, "%s,mean,%s,%d,%d,0,%d,%.9f,%.9f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+                    scope,mode_name((Mode)mode),c->n,threads,c->frames,
+                    compute[mode]/c->repeats,total[mode]/c->repeats,fps,
+                    sc,sc/threads,st,st/threads);
+        }
+    }
+    if (!success) fprintf(stderr, "Prueba incompleta: CSV parcial, sin resumen valido.\n");
+    free(records);
+    if (ferror(file)) success = 0;
+    if (fclose(file) != 0) success = 0;
+    return success;
+}
