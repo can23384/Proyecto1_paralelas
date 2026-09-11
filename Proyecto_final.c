@@ -636,3 +636,30 @@ done:
             : "SELF-TEST FALLIDO");
     return ok;
 }
+
+int main(int argc, char **argv) {
+    Config c = {
+        .n=200, .width=800, .height=600, .threads=4, .chunk=32,
+        .frames=300, .warmup=60, .repeats=10, .seed=12345,
+        .speed=170, .radius=8, .foot_size=10, .foot_gap=14,
+        .step_interval=0.12, .fps=60, .dt=1.0/60,
+        .mode=PAR_STATIC, .csv="resultados.csv"
+    };
+    c.threads = omp_get_max_threads();
+    int parsed = arguments(argc,argv,&c);
+    if (parsed <= 0) return parsed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    omp_set_dynamic(0);
+    omp_set_num_threads(c.threads);
+    if (c.self_test) return self_test(&c) ? EXIT_SUCCESS : EXIT_FAILURE;
+    Simulation s = {0};
+    Graphics graphics = {0};
+    if (!allocate_simulation(&s,c.n)) return EXIT_FAILURE;
+    if (!c.headless && !open_graphics(&graphics,&c)) {
+        close_graphics(&graphics); free_simulation(&s); return EXIT_FAILURE;
+    }
+    int ok = c.benchmark ? benchmark(&graphics,&s,&c) : interactive(&graphics,&s,&c);
+    if (!c.headless) close_graphics(&graphics);
+    free_simulation(&s);
+    return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
