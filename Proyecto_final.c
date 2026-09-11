@@ -572,3 +572,67 @@ static int benchmark(Graphics *g, Simulation *s, const Config *c) {
     if (fclose(file) != 0) success = 0;
     return success;
 }
+
+static int equal_walker(const Walker *a, const Walker *b) {
+    if (a->x != b->x || a->y != b->y || a->vx != b->vx || a->vy != b->vy ||
+        a->accumulator != b->accumulator || a->trail_count != b->trail_count ||
+        a->r != b->r || a->g != b->g || a->b != b->b) return 0;
+    for (int i = 0; i < a->trail_count; ++i)
+        if (a->trail[i].x != b->trail[i].x || a->trail[i].y != b->trail[i].y ||
+            a->trail[i].angle != b->trail[i].angle) return 0;
+    return 1;
+}
+
+static int self_test(const Config *config) {
+    Config c = *config;
+    c.n = 48; c.width = 640; c.height = 480;
+    c.speed = 170; c.radius = 8; c.foot_gap = 14; c.foot_size = 10;
+    c.step_interval = 0.12; c.dt = 1.0/60;
+    Simulation a = {0}, b = {0};
+    int ok = 0;
+    if (!allocate_simulation(&a,c.n) || !allocate_simulation(&b,c.n)) goto done;
+    for (int mode = PAR_STATIC; mode <= PAR_DYNAMIC; ++mode) {
+        reset_simulation(&a,&c); reset_simulation(&b,&c);
+        /* Superposicion exacta, colision frontal y rebote en esquina. */
+        a.current[0].x = a.current[1].x = 320;
+        a.current[0].y = a.current[1].y = 240;
+        a.current[2].x = 100; a.current[3].x = 114;
+        a.current[2].y = a.current[3].y = 100;
+        a.current[2].vx = 60; a.current[3].vx = -60;
+        a.current[2].vy = a.current[3].vy = 0;
+        a.current[4].x = a.current[4].y = margin(&c);
+        a.current[4].vx = a.current[4].vy = -60;
+        memcpy(b.current,a.current,(size_t)c.n*sizeof(Walker));
+        for (int frame = 0; frame < 180; ++frame) {
+            advance(&a,&c,SEQUENTIAL,c.dt);
+            advance(&b,&c,(Mode)mode,c.dt);
+            for (int i = 0; i < c.n; ++i) {
+                Walker *w = &a.current[i];
+                double m = margin(&c);
+                if (!equal_walker(w,&b.current[i]) ||
+                    !isfinite(w->x) || !isfinite(w->y) ||
+                    !isfinite(w->vx) || !isfinite(w->vy) ||
+                    w->x < m || w->x > c.width-m ||
+                    w->y < m || w->y > c.height-m ||
+                    w->trail_count < 1 || w->trail_count > TRAIL_PAIRS) goto done;
+            }
+        }
+    }
+    /* Colision aislada: intercambiar velocidades normales, separar discos. */
+    c.n = 2;
+    reset_simulation(&a,&c);
+    a.current[0].x = 100; a.current[1].x = 114;
+    a.current[0].y = a.current[1].y = 100;
+    a.current[0].vx = 60; a.current[1].vx = -60;
+    a.current[0].vy = a.current[1].vy = 0;
+    step(&a,&c,PAR_STATIC,0.001);
+    if (fabs(a.current[0].vx+60) > 1e-9 ||
+        fabs(a.current[1].vx-60) > 1e-9 ||
+        a.current[1].x-a.current[0].x < 2*c.radius) goto done;
+    ok = 1;
+done:
+    free_simulation(&a); free_simulation(&b);
+    puts(ok ? "SELF-TEST OK: equivalencia seq/static/dynamic, limites, huellas y colisiones."
+            : "SELF-TEST FALLIDO");
+    return ok;
+}
